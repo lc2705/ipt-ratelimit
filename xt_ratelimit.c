@@ -40,6 +40,7 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
+#include <linux/sched.h>
 #include "compat.h"
 #include "xt_ratelimit.h"
 
@@ -104,10 +105,18 @@ struct ratelimit_stat {
 #endif
 };
 
+/*proto type*/
+enum {
+    P_ANY = 0,
+	P_TCP = 1,
+	P_UDP = 2,
+};
+
 /* hash bucket entity */
 struct ratelimit_match {
 	struct hlist_node node;		/* hash bucket list */
 	__be32 addr;
+	u8 proto;
 	struct ratelimit_ent *ent;	/* owner */
 };
 
@@ -196,6 +205,11 @@ static int ratelimit_seq_ent_show(struct ratelimit_match *mt,
 		seq_printf(s, "%s%pI4",
 		    i == 0? "" : ",",
 		    &ent->matches[i].addr);
+
+        if(ent->matches[i].proto == P_TCP)
+            seq_printf(s, "|TCP");
+        else if(ent->matches[i].proto == P_UDP)
+            seq_printf(s, "|UDP");
 	}
 	seq_printf(s, " cir %u cbs %u ebs %u;",
 	    ent->car.cir, ent->car.cbs, ent->car.ebs);
@@ -302,7 +316,7 @@ static int ratelimit_proc_open(struct inode *inode, struct file *file)
 
 static void ratelimit_table_flush(struct xt_ratelimit_htable *ht);
 static struct ratelimit_ent *ratelimit_ent_zalloc(int msize);
-static inline struct ratelimit_ent *ratelimit_match_find(const struct xt_ratelimit_htable *ht, const __be32 addr);
+static inline struct ratelimit_ent *ratelimit_match_find(const struct xt_ratelimit_htable *ht, const __be32 addr, const u8 proto);
 static void ratelimit_ent_add(struct xt_ratelimit_htable *ht, struct ratelimit_ent *ent);
 static void ratelimit_ent_del(struct xt_ratelimit_htable *ht, struct ratelimit_ent *ent);
 
@@ -377,6 +391,8 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
 	    p < endp && *p && (ptok = in4_pton(p, size - (p - str), (u8 *)&addr, -1, &p));
 	    ++p) {
 		++ent_size;
+		if(*p == '|')
+            p += 4;
 		if (p >= endp || !*p || *p == ' ')
 			break;
 		else if (*p != ',') {
@@ -403,13 +419,30 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
 
 		BUG_ON(i >= ent_size);
 		mt->addr = addr;
+		mt->proto = P_ANY;
 		mt->ent = ent;
+		if(*p == '|')
+        {
+            p++;
+            if (strncmp(p, "tcp", 3) == 0)
+				mt->proto = P_TCP;
+            else if (strncmp(p, "udp", 3) == 0)
+                mt->proto = P_UDP;
+            else
+            {
+                pr_err("Undefined protocol type. (cmd: %s)\n", buf);
+                kvfree(ent);
+                return -EINVAL;
+            }
+            p += 4;
+        }
+
 		++ent->mtcnt;
 		/* there should not be duplications,
 		 * this is also important for below test of mtcnt */
 		for (j = 0; j < i; ++j)
-			if (ent->matches[j].addr == addr) {
-				pr_err("Duplicated IP address %pI4 in list (cmd: %s)\n", &addr, buf);
+			if (ent->matches[j].addr == addr && ent->matches[j].proto == mt->proto) {
+				pr_err("Duplicated IP address %pI4|protocol in list (cmd: %s)\n", &addr, buf);
 				kvfree(ent);
 				return -EINVAL;
 			}
@@ -467,7 +500,7 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
 		struct ratelimit_match *mt = &ent->matches[i];
 		struct ratelimit_ent *tent;
 
-		tent = ratelimit_match_find(ht, mt->addr);
+		tent = ratelimit_match_find(ht, mt->addr, mt->proto);
 		if (!ent_chk)
 			ent_chk = tent;
 		if (tent != ent_chk) {
@@ -629,7 +662,7 @@ hash_addr(const struct xt_ratelimit_htable *ht, const __be32 addr)
 /* get (car) entity by address */
 static inline struct ratelimit_ent *
 ratelimit_match_find(const struct xt_ratelimit_htable *ht,
-    const __be32 addr)
+    const __be32 addr, const u8 proto)
 {
 	const u_int32_t hash = hash_addr(ht, addr);
 
@@ -640,7 +673,7 @@ ratelimit_match_find(const struct xt_ratelimit_htable *ht,
 #endif
 
 		compat_hlist_for_each_entry_rcu(mt, pos, &ht->hash[hash], node)
-			if (mt->addr == addr)
+			if (mt->addr == addr && mt->proto == proto)
 				return mt->ent;
 	}
 	return NULL;
@@ -828,16 +861,24 @@ ratelimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	struct xt_ratelimit_htable *ht = mtinfo->ht;
 	struct ratelimit_ent *ent;
 	const unsigned long now = jiffies;
+	struct iphdr *iph = ip_hdr(skb);
 	__be32 addr;
+	u8 proto;
 	int match = false; /* no match, no drop */
 
 	if (mtinfo->mode & XT_RATELIMIT_DST)
-		addr = ip_hdr(skb)->daddr;
+		addr = iph->daddr;
 	else
-		addr = ip_hdr(skb)->saddr;
+		addr = iph->saddr;
+    if(iph->protocol == IPPROTO_TCP)
+        proto = P_TCP;
+    else if(iph->protocol == IPPROTO_UDP)
+        proto = P_UDP;
+    else
+        proto = P_ANY;
 
 	rcu_read_lock();
-	ent = ratelimit_match_find(ht, addr);
+	ent = ratelimit_match_find(ht, addr, proto);
 	if (ent) {
 		struct ratelimit_car *car = &ent->car;
 		const unsigned int len = skb->len; /* L3 */
