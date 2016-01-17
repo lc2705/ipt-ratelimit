@@ -44,7 +44,7 @@ linstall: libxt_ratelimit.so
 
 uninstall:
 	-rm -f $(DESTDIR)$(shell pkg-config --variable xtlibdir xtables)/libxt_ratelimit.so
-	-rm -f $(KDIR)/extra/xt_ratelimit.ko
+	-rm -f /lib/modules/$(KVER)/extra/xt_ratelimit.ko
 
 load: all
 	-sync

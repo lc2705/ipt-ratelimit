@@ -51,7 +51,7 @@
 # define XT_RATELIMIT_VERSION GIT_VERSION
 #endif
 
-MODULE_AUTHOR("<abc@telekom.ru>");
+MODULE_AUTHOR("COMPUTE NETWORK PROJECT by LC");
 MODULE_DESCRIPTION("iptables ratelimit policer mt module");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(XT_RATELIMIT_VERSION);
@@ -207,9 +207,9 @@ static int ratelimit_seq_ent_show(struct ratelimit_match *mt,
 		    &ent->matches[i].addr);
 
         if(ent->matches[i].proto == P_TCP)
-            seq_printf(s, "|TCP");
+            seq_printf(s, ":TCP");
         else if(ent->matches[i].proto == P_UDP)
-            seq_printf(s, "|UDP");
+            seq_printf(s, ":UDP");
 	}
 	seq_printf(s, " cir %u cbs %u ebs %u;",
 	    ent->car.cir, ent->car.cbs, ent->car.ebs);
@@ -391,7 +391,7 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
 	    p < endp && *p && (ptok = in4_pton(p, size - (p - str), (u8 *)&addr, -1, &p));
 	    ++p) {
 		++ent_size;
-		if(*p == '|')
+		if(*p == ':')
             p += 4;
 		if (p >= endp || !*p || *p == ' ')
 			break;
@@ -421,7 +421,7 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
 		mt->addr = addr;
 		mt->proto = P_ANY;
 		mt->ent = ent;
-		if(*p == '|')
+		if(*p == ':')
         {
             p++;
             if (strncmp(p, "tcp", 3) == 0)
@@ -434,7 +434,7 @@ static int parse_rule(struct xt_ratelimit_htable *ht, char *str, size_t size)
                 kvfree(ent);
                 return -EINVAL;
             }
-            p += 4;
+            p += 3;
         }
 
 		++ent->mtcnt;
@@ -673,7 +673,8 @@ ratelimit_match_find(const struct xt_ratelimit_htable *ht,
 #endif
 
 		compat_hlist_for_each_entry_rcu(mt, pos, &ht->hash[hash], node)
-			if (mt->addr == addr && mt->proto == proto)
+			if (mt->addr == addr && 
+			 (mt->proto == P_ANY || mt->proto == proto))
 				return mt->ent;
 	}
 	return NULL;
